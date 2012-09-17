@@ -359,16 +359,16 @@ void BEFreeFullValidator(void * self){
 
 //  Functions
 
-BEBlockReference * BEBlockBranchFindBlock(BEBlockBranch * branch, CBByteArray * hash){
+BEBlockReference * BEBlockBranchFindBlock(BEBlockBranch * branch, uint8_t * hash){
 	// Branches use a sorted list of block hashes, therefore this uses an interpolation search which is an optimsation on binary search.
 	uint32_t left = 0;
 	uint32_t right = branch->numRefs - 1;
-	uint64_t miniKey = CBByteArrayReadInt64(hash, 24);
+	uint64_t miniKey = BEHashMiniKey(hash);
 	uint64_t leftMiniKey;
 	uint64_t rightMiniKey;
 	for (;;) {
-		if (memcmp(CBByteArrayGetData(hash), branch->references[right].blockHash, 32) > 0
-			|| memcmp(CBByteArrayGetData(hash), branch->references[left].blockHash, 32) < 0)
+		if (memcmp(hash, branch->references[right].blockHash, 32) > 0
+			|| memcmp(hash, branch->references[left].blockHash, 32) < 0)
 			return NULL;
 		uint32_t pos;
 		if (rightMiniKey - leftMiniKey){
@@ -380,7 +380,7 @@ BEBlockReference * BEBlockBranchFindBlock(BEBlockBranch * branch, CBByteArray * 
 				pos = pos = (right + left)/2;
 		}else
 			pos = pos = (right + left)/2;
-		int res = memcmp(CBByteArrayGetData(hash), branch->references[pos].blockHash, 32);
+		int res = memcmp(hash, branch->references[pos].blockHash, 32);
 		if (NOT res)
 			return branch->references + pos;
 		else if (res > 0)
@@ -391,9 +391,9 @@ BEBlockReference * BEBlockBranchFindBlock(BEBlockBranch * branch, CBByteArray * 
 }
 BEBlockStatus BEFullValidatorProcessBlock(BEFullValidator * self, CBBlock * block, uint64_t networkTime){
 	// Get the block hash
-	CBByteArray * hash = CBBlockGetHash(block);
+	uint8_t * hash = CBBlockGetHash(block);
 	for (uint8_t x = 0; x < self->numOrphans; x++)
-		if (NOT memcmp(self->orphans[x].blockHash, CBByteArrayGetData(hash), 32))
+		if (NOT memcmp(self->orphans[x].blockHash, hash, 32))
 			return BE_BLOCK_STATUS_DUPLICATE;
 	for (uint8_t x = 0; x < self->numBranches; x++)
 		if (BEBlockBranchFindBlock(self->branches + x, hash))

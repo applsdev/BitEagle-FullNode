@@ -137,10 +137,10 @@ void BEFreeFullValidator(void * self);
 /**
  @brief Returns the BEBlockReference for a hash from a branch if it exists.
  @param branch The branch to search.
- @param hash The hash of the block to search for.
+ @param hash The hash of the block to search for. Must be 32 bytes.
  @returns a BEBlockReference if one exists or NULL.
  */
-BEBlockReference * BEBlockBranchFindBlock(BEBlockBranch * branch, CBByteArray * hash);
+BEBlockReference * BEBlockBranchFindBlock(BEBlockBranch * branch, uint8_t * hash);
 /**
  @brief Processes a block. Block headers are validated, ensuring the integrity of the transaction data is OK, checking the block's proof of work and calculating the total branch work to the genesis block. If the block extends the main branch complete validation is done. If the block extends a branch to become the new main branch because it has the most work, a re-organisation of the block-chain is done.
  @param self The BEFullValidator object.
