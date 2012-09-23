@@ -64,7 +64,7 @@ int main(){
 		printf("LAST BLOCK FAIL\n");
 		return 1;
 	}
-	if(validator->branches[0].lastRetarget){
+	if(validator->branches[0].lastRetargetTime != 1231006505){
 		printf("LAST RETARGET FAIL\n");
 		return 1;
 	}
