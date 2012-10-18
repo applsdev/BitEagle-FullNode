@@ -28,7 +28,7 @@
 #define BE_DATA_DIRECTORY "/.BitEagle_FullNode_Data/"
 #define BE_ADDRESS_DATA_FILE "addresses.dat"
 #define BE_VALIDATION_DATA_FILE "validation.dat"
-#define BE_MAX_ORPHAN_CACHE 3
+#define BE_MAX_ORPHAN_CACHE 20
 #define BE_MAX_BRANCH_CACHE 4
 #define BE_NO_VALIDATION 0xFFFFFFFF
 #define BEHashMiniKey(hash) (uint64_t)hash[31] << 56 | (uint64_t)hash[30] << 48 | (uint64_t)hash[29] << 40 | (uint64_t)hash[28] << 32 | (uint64_t)hash[27] << 24 | (uint64_t)hash[26] << 16 | (uint64_t)hash[25] << 8 | (uint64_t)hash[24]

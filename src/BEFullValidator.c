@@ -87,7 +87,7 @@ void BEFreeFullValidator(void * self){
 
 //  Functions
 
-bool BEFullValidatorAddBlockToBranch(BEFullValidator * self, uint8_t branch, CBBlock * block){
+bool BEFullValidatorAddBlockToBranch(BEFullValidator * self, uint8_t branch, CBBlock * block, CBBigInt work){
 	// Save block. First find first block file with space.
 	uint16_t fileIndex = 0;
 	uint64_t size;
@@ -153,7 +153,7 @@ bool BEFullValidatorAddBlockToBranch(BEFullValidator * self, uint8_t branch, CBB
 		temp3 += block->transactions[x]->outputNum;
 	}
 	// Reallocate for new size
-	BEOutputReference * temp4 = realloc(self->branches[branch].unspentOutputs, temp3);
+	BEOutputReference * temp4 = realloc(self->branches[branch].unspentOutputs, temp3 * sizeof(*self->branches[branch].unspentOutputs));
 	if (NOT temp4) {
 		// Failure, reset data
 		ftruncate(fileno(fp), size);
@@ -169,6 +169,8 @@ bool BEFullValidatorAddBlockToBranch(BEFullValidator * self, uint8_t branch, CBB
 	// Update branch data
 	if (NOT (self->branches[branch].startHeight + self->branches[branch].numRefs) % 2016)
 		self->branches[branch].lastRetargetTime = block->time;
+	free(self->branches[branch].work.data);
+	self->branches[branch].work = work;
 	// Insert block data
 	self->branches[branch].references[refIndex].ref.fileID = fileIndex;
 	self->branches[branch].references[refIndex].ref.filePos = size;
@@ -180,7 +182,10 @@ bool BEFullValidatorAddBlockToBranch(BEFullValidator * self, uint8_t branch, CBB
 	cursor += byte < 253 ? 1 : (byte == 253 ? 2 : (byte == 254 ? 4 : 8));
 	for (uint32_t x = 0; x < block->transactionNum; x++) {
 		bool found;
-		cursor += 8; // Move along version number and input number.
+		cursor += 4; // Move along version number
+		// Move along input number
+		byte = CBByteArrayGetByte(CBGetMessage(block)->bytes, cursor);
+		cursor += byte < 253 ? 1 : (byte == 253 ? 2 : (byte == 254 ? 4 : 8));
 		// First remove output references than add new outputs.
 		for (uint32_t y = 0; y < block->transactions[x]->inputNum; y++) {
 			if (x) {
@@ -199,24 +204,29 @@ bool BEFullValidatorAddBlockToBranch(BEFullValidator * self, uint8_t branch, CBB
 			cursor += 4;
 		}
 		// Move cursor past output number to first output
-		cursor += 4;
+		byte = CBByteArrayGetByte(CBGetMessage(block)->bytes, cursor);
+		cursor += byte < 253 ? 1 : (byte == 253 ? 2 : (byte == 254 ? 4 : 8));
 		// Now add new outputs
 		for (uint32_t y = 0; y < block->transactions[x]->outputNum; y++) {
 			uint32_t ref = BEFullValidatorFindOutputReference(self->branches[branch].unspentOutputs, self->branches[branch].numUnspentOutputs, CBTransactionGetHash(block->transactions[x]), y, &found);
 			// Insert the output information at the reference point.
-			memmove(self->branches[branch].unspentOutputs + ref + 1, self->branches[branch].unspentOutputs + ref, (self->branches[branch].numUnspentOutputs - ref - 1) * sizeof(*self->branches[branch].unspentOutputs));
+			if (self->branches[branch].numUnspentOutputs > ref)
+				// Move other references up to make room
+				memmove(self->branches[branch].unspentOutputs + ref + 1, self->branches[branch].unspentOutputs + ref, (self->branches[branch].numUnspentOutputs - ref) * sizeof(*self->branches[branch].unspentOutputs));
 			self->branches[branch].numUnspentOutputs++;
 			self->branches[branch].unspentOutputs[ref].branch = branch;
 			self->branches[branch].unspentOutputs[ref].coinbase = NOT x;
 			memcpy(self->branches[branch].unspentOutputs[ref].outputHash,CBTransactionGetHash(block->transactions[x]),32);
 			self->branches[branch].unspentOutputs[ref].outputIndex = y;
 			self->branches[branch].unspentOutputs[ref].ref.fileID = fileIndex;
-			self->branches[branch].unspentOutputs[ref].ref.filePos = cursor;
+			self->branches[branch].unspentOutputs[ref].ref.filePos = cursor + size + 4; // Block cursor plus 4 for the length and the file size
 			// Move cursor past the output
 			uint8_t byte = CBByteArrayGetByte(CBGetMessage(block)->bytes, cursor);
 			cursor += byte < 253 ? 1 : (byte == 253 ? 2 : (byte == 254 ? 4 : 8));
 			cursor += 8;
 		}
+		// Update size
+		size += 4 + cursor;
 	}
 	// Update validation file.
 	if (NOT BEFullValidatorSaveBranchValidator(self, branch)){
@@ -400,6 +410,20 @@ FILE * BEFullValidatorGetBlockFile(BEFullValidator * self, uint16_t fileID, uint
 		}
 	}
 }
+uint32_t BEFullValidatorGetMedianTime(BEFullValidator * self, uint8_t branch, uint32_t prevIndex){
+	uint32_t height = self->branches[branch].startHeight + prevIndex;
+	height = (height > 12)? 12 : height;
+	uint8_t x = height/2; // Go back median amount
+	for (;;) {
+		if (prevIndex >= x) {
+			prevIndex -= x;
+			return self->branches[branch].references[prevIndex].time;
+		}
+		branch = self->branches[branch].parentBranch;
+		prevIndex = self->branches[branch].numRefs - 1;
+		x -= prevIndex;
+	}
+}
 BEBlockValidationResult BEFullValidatorInputValidation(BEFullValidator * self, uint8_t branch, CBBlock * block, uint32_t blockHeight, uint32_t transactionIndex,uint32_t inputIndex, CBPrevOut ** allSpentOutputs, uint8_t * txHashes, uint64_t * value, uint32_t * sigOps){
 	// Check that the previous output is not already spent by this block.
 	for (uint32_t a = 0; a < transactionIndex; a++)
@@ -432,7 +456,7 @@ BEBlockValidationResult BEFullValidatorInputValidation(BEFullValidator * self, u
 			return BE_BLOCK_VALIDATION_BAD;
 		outRef = self->branches[branch].unspentOutputs + i;
 		// Check coinbase maturity
-		if (outRef->coinbase && outRef->height < blockHeight - CB_COINBASE_MATURITY)
+		if (outRef->coinbase && blockHeight - outRef->height < CB_COINBASE_MATURITY) 
 			return BE_BLOCK_VALIDATION_BAD;
 		// Get the output
 		FILE * fd = BEFullValidatorGetBlockFile(self, outRef->ref.fileID,outRef->branch);
@@ -519,6 +543,11 @@ BEBlockValidationResult BEFullValidatorInputValidation(BEFullValidator * self, u
 }
 uint32_t BEFullValidatorFindBlockReference(BEBlockReferenceHashIndex * lookupTable, uint32_t refNum, uint8_t * hash, bool * found){
 	// Block branch block reference lists and the unspent output reference list, use sorted lists, therefore this uses an interpolation search which is an optimsation on binary search.
+	if (NOT refNum){
+		// No references yet so add at index 0
+		*found = false;
+		return 0;
+	}
 	uint32_t left = 0;
 	uint32_t right = refNum - 1;
 	uint64_t miniKey = BEHashMiniKey(hash);
@@ -999,10 +1028,12 @@ BEBlockStatus BEFullValidatorProcessBlock(BEFullValidator * self, CBBlock * bloc
 	uint8_t prevBranch = 0;
 	uint32_t prevBlockIndex;
 	for (; prevBranch < self->numBranches; prevBranch++){
-		prevBlockIndex = self->branches[prevBranch].referenceTable[BEFullValidatorFindBlockReference(self->branches[prevBranch].referenceTable, self->branches[prevBranch].numRefs, CBByteArrayGetData(block->prevBlockHash),&found)].index;
-		if (found)
+		uint32_t refIndex = BEFullValidatorFindBlockReference(self->branches[prevBranch].referenceTable, self->branches[prevBranch].numRefs, CBByteArrayGetData(block->prevBlockHash),&found);
+		if (found){
 			// The block is extending this branch or creating a side branch to this branch
+			prevBlockIndex = self->branches[prevBranch].referenceTable[refIndex].index;
 			break;
+		}
 	}
 	if (prevBranch == self->numBranches){
 		// Orphan block. End here.
@@ -1022,7 +1053,6 @@ BEBlockStatus BEFullValidatorProcessBlock(BEFullValidator * self, CBBlock * bloc
 	}
 	// Not an orphan. See if this is an extention or new branch.
 	uint8_t branch;
-	uint32_t nextHeight = self->branches[prevBranch].startHeight + prevBlockIndex + 1;
 	if (prevBlockIndex == self->branches[prevBranch].numRefs - 1) {
 		// Extension
 		// Do basic validation with a copy of the transaction hashes.
@@ -1058,7 +1088,7 @@ BEBlockStatus BEFullValidatorProcessBlock(BEFullValidator * self, CBBlock * bloc
 		// Copy work over
 		memcpy(self->branches[branch].work.data, self->branches[prevBranch].work.data, self->branches[branch].work.length);
 		// Remove later block work down to the fork
-		for (uint32_t y = nextHeight - self->branches[prevBranch].startHeight; y < self->branches[prevBranch].numRefs; y++) {
+		for (uint32_t y = prevBlockIndex + 1; y < self->branches[prevBranch].numRefs; y++) {
 			CBBigInt tempWork;
 			if (NOT CBCalculateBlockWork(&tempWork,self->branches[prevBranch].references[y].target)){
 				free(txHashes);
@@ -1068,103 +1098,121 @@ BEBlockStatus BEFullValidatorProcessBlock(BEFullValidator * self, CBBlock * bloc
 			free(tempWork.data); 
 		}
 		self->branches[branch].lastValidation = BE_NO_VALIDATION;
+		self->numBranches++;
 	}
-	// Check timestamp six blocks back
-	uint8_t tempBranch = prevBranch;
-	uint32_t tempBlockIndex = prevBlockIndex;
-	uint8_t x = 6;
-	for (;;) {
-		if (tempBlockIndex >= x) {
-			tempBlockIndex -= x;
-			break;
+	// Got branch ready for block. Now process into the branch.
+	BEBlockStatus res = BEFullValidatorProcessIntoBranch(self, block, networkTime, branch, prevBranch, prevBlockIndex, txHashes);
+	free(txHashes);
+	// Now go through any orphans
+	for (uint8_t x = 0; x < self->numOrphans; x++){
+		if (NOT memcmp(CBBlockGetHash(block), CBByteArrayGetData(self->orphans[x]->prevBlockHash), 32)) {
+			// Moving onto this block.
+			// Make transaction hashes.
+			txHashes = malloc(32 * self->orphans[x]->transactionNum);
+			if (NOT txHashes)
+				break;
+			// Put the hashes for transactions into a list.
+			for (uint32_t x = 0; x < self->orphans[x]->transactionNum; x++)
+				memcpy(txHashes + 32*x, CBTransactionGetHash(self->orphans[x]->transactions[x]), 32);
+			// Process into the branch.
+			if (BEFullValidatorProcessIntoBranch(self, self->orphans[x], networkTime, branch, branch, self->branches[branch].numRefs - 1, txHashes) == BE_BLOCK_STATUS_ERROR)
+				break;
+			// Remove orphan now we are done.
+			CBReleaseObject(self->orphans[x]);
+			self->numOrphans--;
+			if (self->numOrphans > x)
+				// Move orphans down
+				memmove(self->orphans + x, self->orphans + x + 1, sizeof(*self->orphans) * (self->numOrphans - x));
+			// Reset x and set the block as we will now go through the orphans again until no more can be satisfied for this branch.
+			x = 0;
+			block = self->orphans[x];
 		}
-		if (NOT tempBranch){
-			// Cannot go back further.
-			tempBlockIndex = 0;
-			break;
-		}
-		tempBranch = self->branches[tempBranch].parentBranch;
-		tempBlockIndex = self->branches[tempBranch].numRefs - 1;
-		x -= tempBlockIndex;
 	}
+	return res;
+}
+BEBlockStatus BEFullValidatorProcessIntoBranch(BEFullValidator * self, CBBlock * block, uint64_t networkTime, uint8_t branch, uint8_t prevBranch, uint32_t prevBlockIndex, uint8_t * txHashes){
 	// Check timestamp
-	if (block->time < self->branches[tempBranch].references[tempBlockIndex].time){
-		free(txHashes);
+	if (block->time <= BEFullValidatorGetMedianTime(self, prevBranch, prevBlockIndex))
 		return BE_BLOCK_STATUS_BAD;
-	}
 	uint32_t target;
-	bool change = NOT (nextHeight % 2016);
+	bool change = NOT ((self->branches[prevBranch].startHeight + prevBlockIndex + 1) % 2016);
 	if (change)
 		// Difficulty change for this branch
 		target = CBCalculateTarget(self->branches[prevBranch].references[prevBlockIndex].target, block->time - self->branches[branch].lastRetargetTime);
 	else
 		target = self->branches[prevBranch].references[prevBlockIndex].target;
 	// Check target
-	if (block->target != target){
-		free(txHashes);
+	if (block->target != target)
 		return BE_BLOCK_STATUS_BAD;
-	}
 	// Calculate total work
 	CBBigInt work;
-	if (NOT CBCalculateBlockWork(&work, block->target)){
-		free(txHashes);
+	if (NOT CBCalculateBlockWork(&work, block->target))
 		return BE_BLOCK_STATUS_ERROR;
-	}
-	if (NOT CBBigIntEqualsAdditionByBigInt(&work, &self->branches[branch].work)){
-		free(txHashes);
+	if (NOT CBBigIntEqualsAdditionByBigInt(&work, &self->branches[branch].work))
 		return BE_BLOCK_STATUS_ERROR;
-	}
 	if (branch != self->mainBranch) {
 		// Check if the block is adding to a side branch without becoming the main branch
 		if (CBBigIntCompareToBigInt(&work,&self->branches[self->mainBranch].work) != CB_COMPARE_MORE_THAN){
-			free(txHashes);
 			// Add to branch without complete validation
-			if (NOT BEFullValidatorAddBlockToBranch(self, branch, block))
+			if (NOT BEFullValidatorAddBlockToBranch(self, branch, block, work))
 				// Failure in adding block.
 				return BE_BLOCK_STATUS_ERROR;
 			return BE_BLOCK_STATUS_SIDE;
 		}
 		// Potential block-chain reorganisation. Validate the side branch. THIS NEEDS TO START AT THE FIRST BRANCH BACK WHERE VALIDATION IS NOT COMPLETE AND GO UP THROUGH THE BLOCKS VALIDATING THEM. Includes Prior Branches!
-		tempBranch = prevBranch;
+		uint8_t tempBranch = prevBranch;
 		uint32_t lastBlocks[3]; // Used to store the last blocks in each branch going to the branch we are validating for.
 		uint8_t lastBlocksIndex = 3; // The starting point of lastBlocks. If 3 then we are only validating the branch we added to.
 		uint8_t branches[3]; // Branches to go to after the last blocks.
 		// Go back until we find the branch with validated blocks in it.
-		while (self->branches[self->branches[tempBranch].parentBranch].lastValidation == BE_NO_VALIDATION){
-			branches[--lastBlocksIndex] = tempBranch;
-			tempBranch = self->branches[tempBranch].parentBranch;
-			lastBlocks[lastBlocksIndex] = self->branches[tempBranch].parentBlockIndex;
+		uint32_t tempBlockIndex;
+		for (;;){
+			if (self->branches[tempBranch].lastValidation == BE_NO_VALIDATION){
+				// No validation on this branch
+				if (self->branches[self->branches[tempBranch].parentBranch].lastValidation >= self->branches[tempBranch].parentBlockIndex) {
+					// Parent fully validated upto last index, start at begining of the this branch.
+					tempBlockIndex = 0;
+					break;
+				}
+				branches[--lastBlocksIndex] = tempBranch;
+				tempBranch = self->branches[tempBranch].parentBranch;
+				lastBlocks[lastBlocksIndex] = self->branches[tempBranch].parentBlockIndex;
+			}else{
+				// Not fully validated. Start at last validation plus one.
+				tempBlockIndex = self->branches[tempBranch].lastValidation + 1;
+				break;
+			}
 		}
-		tempBlockIndex = self->branches[self->branches[tempBranch].parentBranch].lastValidation;
 		// Now validate all blocks going up.
 		uint8_t * txHashes2 = NULL;
 		uint32_t txHashes2AllocSize = 0;
 		while (tempBlockIndex != self->branches[branch].numRefs - 1 || tempBranch != branch) {
 			// Get block
 			CBBlock * tempBlock = BEFullValidatorLoadBlock(self, self->branches[tempBranch].references[tempBlockIndex],tempBranch);
-			if (NOT tempBlock) {
-				free(txHashes);
+			if (NOT tempBlock){
+				free(txHashes2);
 				return BE_BLOCK_STATUS_ERROR;
 			}
 			// Get transaction hashes
 			if (txHashes2AllocSize < tempBlock->transactionNum * 32) {
 				txHashes2AllocSize = tempBlock->transactionNum * 32;
-				txHashes2 = realloc(txHashes2, txHashes2AllocSize);
-				if (NOT txHashes2){
-					free(txHashes);
+				uint8_t * temp = realloc(txHashes2, txHashes2AllocSize);
+				if (NOT temp){
+					free(txHashes2);
 					return BE_BLOCK_STATUS_ERROR;
 				}
+				txHashes2 = temp;
 			}
 			for (uint32_t x = 0; x < tempBlock->transactionNum; x++)
 				memcpy(txHashes2 + 32*x, CBTransactionGetHash(tempBlock->transactions[x]), 32);
 			// Validate block
 			BEBlockValidationResult res = BEFullValidatorCompleteBlockValidation(self, tempBranch, tempBlock, txHashes2, self->branches[tempBranch].startHeight + tempBlockIndex);
 			if (res == BE_BLOCK_VALIDATION_BAD){
-				free(txHashes);
+				free(txHashes2);
 				return BE_BLOCK_STATUS_BAD;
 			}
 			if (res == BE_BLOCK_VALIDATION_ERR){
-				free(txHashes);
+				free(txHashes2);
 				return BE_BLOCK_STATUS_ERROR;
 			}
 			// This block passed validation. Move onto next block.
@@ -1182,7 +1230,6 @@ BEBlockStatus BEFullValidatorProcessBlock(BEFullValidator * self, CBBlock * bloc
 	}
 	// We are just validating a new block on the main chain
 	BEBlockValidationResult res = BEFullValidatorCompleteBlockValidation(self, branch, block, txHashes, self->branches[branch].startHeight + self->branches[branch].numRefs);
-	free(txHashes);
 	switch (res) {
 		case BE_BLOCK_VALIDATION_BAD:
 			return BE_BLOCK_STATUS_BAD;
@@ -1190,7 +1237,8 @@ BEBlockStatus BEFullValidatorProcessBlock(BEFullValidator * self, CBBlock * bloc
 			return BE_BLOCK_STATUS_ERROR;
 		case BE_BLOCK_VALIDATION_OK:
 			// Update branch and unspent outputs.
-			if (NOT BEFullValidatorAddBlockToBranch(self, branch, block))
+			self->branches[branch].lastValidation = self->branches[branch].numRefs;
+			if (NOT BEFullValidatorAddBlockToBranch(self, branch, block, work))
 				// Failure in adding block.
 				return BE_BLOCK_STATUS_ERROR;
 			return BE_BLOCK_STATUS_MAIN;

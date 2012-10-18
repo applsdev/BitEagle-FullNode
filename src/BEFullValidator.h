@@ -155,9 +155,10 @@ void BEFreeFullValidator(void * self);
  @param self The BEFullValidator object.
  @param branch The index of the branch to add the block to.
  @param block The block to add.
+ @param work The new branch work. This is not the block work but the total work upto this block. This is taken by the function and the old work is freed.
  @returns true on success and false on error.
  */
-bool BEFullValidatorAddBlockToBranch(BEFullValidator * self, uint8_t branch, CBBlock * block);
+bool BEFullValidatorAddBlockToBranch(BEFullValidator * self, uint8_t branch, CBBlock * block, CBBigInt work);
 /**
  @brief Adds a block to the orphans.
  @param self The BEFullValidator object.
@@ -202,6 +203,13 @@ void BEFullValidatorEnsureCanOpen(BEFullValidator * self);
  @returns The file descriptor on success, or NULL on failure.
  */
 FILE * BEFullValidatorGetBlockFile(BEFullValidator * self, uint16_t fileID, uint8_t branch);
+/**
+ @brief Gets the mimimum time minus one allowed for a new block onto a branch.
+ @param self The BEFullValidator object.
+ @param branch The id of the branch.
+ @param prevIndex The index of the last block to determine the minimum time minus one for when adding onto this block.
+ */
+uint32_t BEFullValidatorGetMedianTime(BEFullValidator * self, uint8_t branch, uint32_t prevIndex);
 /**
  @brief Validates a transaction input.
  @param self The BEFullValidator object.
@@ -265,6 +273,18 @@ bool BEFullValidatorLoadValidator(BEFullValidator * self);
  @return The status of the block.
  */
 BEBlockStatus BEFullValidatorProcessBlock(BEFullValidator * self, CBBlock * block, uint64_t networkTime);
+/**
+ @brief Processes a block into a branch. This is used once basic validation is done on a blocka nd it is determined what branch it needs to go into and when this branch is ready to receive the block.
+ @param self The BEFullValidator object.
+ @param block The block to process.
+ @param networkTime The network time.
+ @param branch The branch to add to.
+ @param prevBranch The branch of the previous block.
+ @param prevBlockIndex The index of the previous block.
+ @param txHashes The transaction hashes for the block.
+ @return The status of the block.
+ */
+BEBlockStatus BEFullValidatorProcessIntoBranch(BEFullValidator * self, CBBlock * block, uint64_t networkTime, uint8_t branch, uint8_t prevBranch, uint32_t prevBlockIndex, uint8_t * txHashes);
 /**
  @brief Saves the validation data for a branch.
  @param self The BEFullValidator object.
